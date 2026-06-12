@@ -206,11 +206,11 @@ func (tpi ProtoInfoTCP) marshal() netfilter.Attribute {
 	if tpi.OriginalFlags != 0 || tpi.ReplyFlags != 0 {
 		origMask := tpi.OriginalMask
 		if origMask == 0 {
-			origMask = tpi.OriginalFlags
+			origMask = 0xffff
 		}
 		replyMask := tpi.ReplyMask
 		if replyMask == 0 {
-			replyMask = tpi.ReplyFlags
+			replyMask = 0xffff
 		}
 		origData := make([]byte, 4)
 		binary.NativeEndian.PutUint16(origData[0:2], tpi.OriginalFlags)
