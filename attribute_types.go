@@ -1,6 +1,7 @@
 package conntrack
 
 import (
+	"encoding/binary"
 	"fmt"
 	"time"
 
@@ -130,7 +131,9 @@ type ProtoInfoTCP struct {
 	OriginalWindowScale uint8
 	ReplyWindowScale    uint8
 	OriginalFlags       uint16
+	OriginalMask        uint16
 	ReplyFlags          uint16
+	ReplyMask           uint16
 }
 
 // unmarshal unmarshals netlink attributes into a ProtoInfoTCP.
@@ -154,9 +157,23 @@ func (tpi *ProtoInfoTCP) unmarshal(ad *netlink.AttributeDecoder) error {
 		case ctaProtoInfoTCPWScaleReply:
 			tpi.ReplyWindowScale = ad.Uint8()
 		case ctaProtoInfoTCPFlagsOriginal:
-			tpi.OriginalFlags = ad.Uint16()
+			// The kernel struct is nf_ct_tcp_flags { __u16 flags; __u16 mask; } (4 bytes,
+			// native byte order). ad.Bytes() gives us the raw payload.
+			b := ad.Bytes()
+			if len(b) >= 2 {
+				tpi.OriginalFlags = binary.NativeEndian.Uint16(b[0:2])
+			}
+			if len(b) >= 4 {
+				tpi.OriginalMask = binary.NativeEndian.Uint16(b[2:4])
+			}
 		case ctaProtoInfoTCPFlagsReply:
-			tpi.ReplyFlags = ad.Uint16()
+			b := ad.Bytes()
+			if len(b) >= 2 {
+				tpi.ReplyFlags = binary.NativeEndian.Uint16(b[0:2])
+			}
+			if len(b) >= 4 {
+				tpi.ReplyMask = binary.NativeEndian.Uint16(b[2:4])
+			}
 		default:
 			return fmt.Errorf("child type %d: %w", ad.Type(), errUnknownAttribute)
 		}
@@ -180,10 +197,30 @@ func (tpi ProtoInfoTCP) marshal() netfilter.Attribute {
 	}
 
 	// Only append TCP flags to attributes when either of them is non-zero.
+	// The kernel struct is nf_ct_tcp_flags { __u16 flags; __u16 mask; } (4 bytes,
+	// native byte order). The mask controls which flag bits are actually applied:
+	//   ct->seen[dir].flags &= ~mask
+	//   ct->seen[dir].flags |= flags & mask
+	// With mask=0 (the old 2-byte encoding) the operation is a no-op.
+	// Default mask to flags so callers that only set Flags get the expected behaviour.
 	if tpi.OriginalFlags != 0 || tpi.ReplyFlags != 0 {
+		origMask := tpi.OriginalMask
+		if origMask == 0 {
+			origMask = tpi.OriginalFlags
+		}
+		replyMask := tpi.ReplyMask
+		if replyMask == 0 {
+			replyMask = tpi.ReplyFlags
+		}
+		origData := make([]byte, 4)
+		binary.NativeEndian.PutUint16(origData[0:2], tpi.OriginalFlags)
+		binary.NativeEndian.PutUint16(origData[2:4], origMask)
+		replyData := make([]byte, 4)
+		binary.NativeEndian.PutUint16(replyData[0:2], tpi.ReplyFlags)
+		binary.NativeEndian.PutUint16(replyData[2:4], replyMask)
 		nfa.Children = append(nfa.Children,
-			netfilter.Attribute{Type: uint16(ctaProtoInfoTCPFlagsOriginal), Data: netfilter.Uint16Bytes(tpi.OriginalFlags)},
-			netfilter.Attribute{Type: uint16(ctaProtoInfoTCPFlagsReply), Data: netfilter.Uint16Bytes(tpi.ReplyFlags)})
+			netfilter.Attribute{Type: uint16(ctaProtoInfoTCPFlagsOriginal), Data: origData},
+			netfilter.Attribute{Type: uint16(ctaProtoInfoTCPFlagsReply), Data: replyData})
 	}
 
 	return nfa
