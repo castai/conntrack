@@ -204,20 +204,12 @@ func (tpi ProtoInfoTCP) marshal() netfilter.Attribute {
 	// With mask=0 (the old 2-byte encoding) the operation is a no-op.
 	// Default mask to flags so callers that only set Flags get the expected behaviour.
 	if tpi.OriginalFlags != 0 || tpi.ReplyFlags != 0 {
-		origMask := tpi.OriginalMask
-		if origMask == 0 {
-			origMask = 0xffff
-		}
-		replyMask := tpi.ReplyMask
-		if replyMask == 0 {
-			replyMask = 0xffff
-		}
 		origData := make([]byte, 4)
 		binary.NativeEndian.PutUint16(origData[0:2], tpi.OriginalFlags)
-		binary.NativeEndian.PutUint16(origData[2:4], origMask)
+		binary.NativeEndian.PutUint16(origData[2:4], tpi.OriginalMask)
 		replyData := make([]byte, 4)
 		binary.NativeEndian.PutUint16(replyData[0:2], tpi.ReplyFlags)
-		binary.NativeEndian.PutUint16(replyData[2:4], replyMask)
+		binary.NativeEndian.PutUint16(replyData[2:4], tpi.ReplyMask)
 		nfa.Children = append(nfa.Children,
 			netfilter.Attribute{Type: uint16(ctaProtoInfoTCPFlagsOriginal), Data: origData},
 			netfilter.Attribute{Type: uint16(ctaProtoInfoTCPFlagsReply), Data: replyData})
