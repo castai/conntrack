@@ -178,7 +178,7 @@ var (
 					},
 				},
 			},
-			flow: Flow{ProtoInfo: ProtoInfo{TCP: &ProtoInfoTCP{State: 1, OriginalFlags: 0x0203, ReplyFlags: 0x0405}}},
+			flow: Flow{ProtoInfo: ProtoInfo{TCP: &ProtoInfoTCP{State: 1, OriginalFlags: 2, OriginalMask: 3, ReplyFlags: 4, ReplyMask: 5}}},
 		},
 		{
 			name: "helper attribute",
