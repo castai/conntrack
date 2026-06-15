@@ -124,11 +124,11 @@ func TestAttributeProtoInfo(t *testing.T) {
 					},
 					{
 						Type: uint16(ctaProtoInfoTCPFlagsOriginal),
-						Data: []byte{0, 4},
+						Data: []byte{4, 0},
 					},
 					{
 						Type: uint16(ctaProtoInfoTCPFlagsReply),
-						Data: []byte{0, 5},
+						Data: []byte{5, 0},
 					},
 				},
 			},
@@ -235,23 +235,75 @@ func TestAttributeProtoInfoTCP(t *testing.T) {
 			Data: []byte{1},
 		},
 		{
+			// byte[0]=flags, byte[1]=mask (kernel struct nf_ct_tcp_flags)
 			Type: uint16(ctaProtoInfoTCPFlagsOriginal),
-			Data: []byte{0, 2},
+			Data: []byte{2, 3},
 		},
 		{
 			Type: uint16(ctaProtoInfoTCPFlagsReply),
-			Data: []byte{0, 3},
+			Data: []byte{4, 5},
 		},
 		{
 			Type: uint16(ctaProtoInfoTCPWScaleOriginal),
-			Data: []byte{4},
+			Data: []byte{6},
 		},
 		{
 			Type: uint16(ctaProtoInfoTCPWScaleReply),
-			Data: []byte{5},
+			Data: []byte{7},
 		},
 	}
 	assert.NoError(t, pit.unmarshal(mustDecodeAttributes(nfaProtoInfoTCP)))
+
+	// Verify all fields are correctly decoded from their byte positions.
+	assert.Equal(t, uint8(1), pit.State)
+	assert.Equal(t, uint8(2), pit.OriginalFlags)
+	assert.Equal(t, uint8(3), pit.OriginalMask)
+	assert.Equal(t, uint8(4), pit.ReplyFlags)
+	assert.Equal(t, uint8(5), pit.ReplyMask)
+	assert.Equal(t, uint8(6), pit.OriginalWindowScale)
+	assert.Equal(t, uint8(7), pit.ReplyWindowScale)
+
+	// Verify marshal produces the expected 2-byte {flags, mask} encoding for each direction.
+	marshalled := pit.marshal()
+	var origFlagsAttr, replyFlagsAttr *netfilter.Attribute
+	for i := range marshalled.Children {
+		switch protoInfoTCPType(marshalled.Children[i].Type) {
+		case ctaProtoInfoTCPFlagsOriginal:
+			origFlagsAttr = &marshalled.Children[i]
+		case ctaProtoInfoTCPFlagsReply:
+			replyFlagsAttr = &marshalled.Children[i]
+		}
+	}
+	if assert.NotNil(t, origFlagsAttr, "expected ctaProtoInfoTCPFlagsOriginal attribute") {
+		assert.Equal(t, []byte{2, 3}, origFlagsAttr.Data, "original flags: byte[0]=flags, byte[1]=mask")
+	}
+	if assert.NotNil(t, replyFlagsAttr, "expected ctaProtoInfoTCPFlagsReply attribute") {
+		assert.Equal(t, []byte{4, 5}, replyFlagsAttr.Data, "reply flags: byte[0]=flags, byte[1]=mask")
+	}
+
+	// A single-byte flags attribute (no mask byte) must not panic and should
+	// leave Mask at its zero value.
+	var pitShort ProtoInfoTCP
+	nfaShortFlags := []netfilter.Attribute{
+		{Type: uint16(ctaProtoInfoTCPState), Data: []byte{0}},
+		{Type: uint16(ctaProtoInfoTCPFlagsOriginal), Data: []byte{0x08}},
+		{Type: uint16(ctaProtoInfoTCPFlagsReply), Data: []byte{0x10}},
+	}
+	assert.NoError(t, pitShort.unmarshal(mustDecodeAttributes(nfaShortFlags)))
+	assert.Equal(t, uint8(0x08), pitShort.OriginalFlags)
+	assert.Equal(t, uint8(0), pitShort.OriginalMask)
+	assert.Equal(t, uint8(0x10), pitShort.ReplyFlags)
+	assert.Equal(t, uint8(0), pitShort.ReplyMask)
+
+	// When flags are all zero, no flag children should be written by marshal.
+	var pitZero ProtoInfoTCP
+	marshalled = pitZero.marshal()
+	for _, child := range marshalled.Children {
+		typ := protoInfoTCPType(child.Type)
+		if typ == ctaProtoInfoTCPFlagsOriginal || typ == ctaProtoInfoTCPFlagsReply {
+			t.Errorf("unexpected flags attribute %v in zero-flags marshal", typ)
+		}
+	}
 }
 
 func TestAttributeProtoInfoDCCP(t *testing.T) {

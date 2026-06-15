@@ -129,8 +129,12 @@ type ProtoInfoTCP struct {
 	State               uint8
 	OriginalWindowScale uint8
 	ReplyWindowScale    uint8
-	OriginalFlags       uint16
-	ReplyFlags          uint16
+	// OriginalFlags and OriginalMask correspond to the kernel struct
+	// nf_ct_tcp_flags { __u8 flags; __u8 mask; } — both fields are uint8.
+	OriginalFlags uint8
+	OriginalMask  uint8
+	ReplyFlags    uint8
+	ReplyMask     uint8
 }
 
 // unmarshal unmarshals netlink attributes into a ProtoInfoTCP.
@@ -154,9 +158,22 @@ func (tpi *ProtoInfoTCP) unmarshal(ad *netlink.AttributeDecoder) error {
 		case ctaProtoInfoTCPWScaleReply:
 			tpi.ReplyWindowScale = ad.Uint8()
 		case ctaProtoInfoTCPFlagsOriginal:
-			tpi.OriginalFlags = ad.Uint16()
+			// The kernel struct is nf_ct_tcp_flags { __u8 flags; __u8 mask; } (2 bytes).
+			b := ad.Bytes()
+			if len(b) >= 1 {
+				tpi.OriginalFlags = b[0]
+			}
+			if len(b) >= 2 {
+				tpi.OriginalMask = b[1]
+			}
 		case ctaProtoInfoTCPFlagsReply:
-			tpi.ReplyFlags = ad.Uint16()
+			b := ad.Bytes()
+			if len(b) >= 1 {
+				tpi.ReplyFlags = b[0]
+			}
+			if len(b) >= 2 {
+				tpi.ReplyMask = b[1]
+			}
 		default:
 			return fmt.Errorf("child type %d: %w", ad.Type(), errUnknownAttribute)
 		}
@@ -180,10 +197,18 @@ func (tpi ProtoInfoTCP) marshal() netfilter.Attribute {
 	}
 
 	// Only append TCP flags to attributes when either of them is non-zero.
+	// The kernel struct is nf_ct_tcp_flags { __u16 flags; __u16 mask; } (4 bytes,
+	// native byte order). The mask controls which flag bits are actually applied:
+	//   ct->seen[dir].flags &= ~mask
+	//   ct->seen[dir].flags |= flags & mask
+	// With mask=0 (the old 2-byte encoding) the operation is a no-op.
+	// Default mask to flags so callers that only set Flags get the expected behaviour.
 	if tpi.OriginalFlags != 0 || tpi.ReplyFlags != 0 {
+		origData := []byte{tpi.OriginalFlags, tpi.OriginalMask}
+		replyData := []byte{tpi.ReplyFlags, tpi.ReplyMask}
 		nfa.Children = append(nfa.Children,
-			netfilter.Attribute{Type: uint16(ctaProtoInfoTCPFlagsOriginal), Data: netfilter.Uint16Bytes(tpi.OriginalFlags)},
-			netfilter.Attribute{Type: uint16(ctaProtoInfoTCPFlagsReply), Data: netfilter.Uint16Bytes(tpi.ReplyFlags)})
+			netfilter.Attribute{Type: uint16(ctaProtoInfoTCPFlagsOriginal), Data: origData},
+			netfilter.Attribute{Type: uint16(ctaProtoInfoTCPFlagsReply), Data: replyData})
 	}
 
 	return nfa
