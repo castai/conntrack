@@ -299,9 +299,33 @@ const (
 
 // enum ctattr_natseq is unused in the kernel source
 
+// natType describes the type of NAT attribute in a CTA_NAT_SRC or CTA_NAT_DST container.
+type natType uint8
+
+// enum ctattr_nat
+const (
+	ctaNatUnspec  natType = iota // CTA_NAT_UNSPEC
+	ctaNatV4MinIP                // CTA_NAT_V4_MINIP
+	ctaNatV4MaxIP                // CTA_NAT_V4_MAXIP
+	ctaNatProto                  // CTA_NAT_PROTO
+	ctaNatV6MinIP                // CTA_NAT_V6_MINIP
+	ctaNatV6MaxIP                // CTA_NAT_V6_MAXIP
+)
+
+// protoNATType describes the type of protocol NAT attribute in a CTA_NAT_PROTO container.
+type protoNATType uint8
+
+// enum ctattr_protonat
+const (
+	ctaProtoNATUnspec  protoNATType = iota // CTA_PROTONAT_UNSPEC
+	ctaProtoNATPortMin                     // CTA_PROTONAT_PORT_MIN
+	ctaProtoNATPortMax                     // CTA_PROTONAT_PORT_MAX
+)
+
 // Unused unspec constants.
 var _ = []uint8{
 	uint8(ctaHelpUnspec), uint8(ctaCountersUnspec), uint8(ctaTimestampUnspec),
 	uint8(ctaSecCtxUnspec), uint8(ctaProtoInfoTCPUnspec), uint8(ctaProtoInfoDCCPUnspec),
 	uint8(ctaProtoInfoSCTPUnspec), uint8(ctaSeqAdjUnspec), uint8(ctaSynProxyUnspec),
+	uint8(ctaNatUnspec), uint8(ctaProtoNATUnspec),
 }

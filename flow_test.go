@@ -420,7 +420,7 @@ func TestFlowMarshal(t *testing.T) {
 	attrs, err := Flow{
 		TupleOrig: flowIPPT, TupleReply: flowIPPT, TupleMaster: flowIPPT,
 		ProtoInfo: ProtoInfo{TCP: &ProtoInfoTCP{State: 42}},
-		Timeout:   123, Status: 1234, Mark: 0x1234, Zone: 2,
+		Timeout:   123, Status: StatusSeenReply | StatusAssured | StatusConfirmed, Mark: 0x1234, Zone: 2,
 		Helper:      Helper{Name: "ftp"},
 		SeqAdjOrig:  SequenceAdjust{Position: 1, OffsetBefore: 2, OffsetAfter: 3},
 		SeqAdjReply: SequenceAdjust{Position: 5, OffsetBefore: 6, OffsetAfter: 7},
@@ -450,7 +450,7 @@ func TestFlowMarshal(t *testing.T) {
 				{Type: uint16(ctaProtoSrcPort), Data: []byte{0xff, 0x0}},
 				{Type: uint16(ctaProtoDstPort), Data: []byte{0x0, 0xff}}}}}},
 		{Type: uint16(ctaTimeout), Data: []byte{0x0, 0x0, 0x0, 0x7b}},
-		{Type: uint16(ctaStatus), Data: []byte{0x0, 0x0, 0x4, 0xd2}},
+		{Type: uint16(ctaStatus), Data: []byte{0x0, 0x0, 0x0, 0x0e}},
 		{Type: uint16(ctaMark), Data: []byte{0x0, 0x0, 0x12, 0x34}},
 		{Type: uint16(ctaZone), Data: []byte{0x0, 0x2}},
 		{Type: uint16(ctaProtoInfo), Nested: true, Children: []netfilter.Attribute{
@@ -547,6 +547,238 @@ func TestNewFlow(t *testing.T) {
 	}
 
 	assert.Equal(t, want, f, "unexpected builder output")
+}
+
+func TestMarshalNAT(t *testing.T) {
+	tests := []struct {
+		name     string
+		attrType uint16
+		addr     netip.Addr
+		port     uint16
+		want     netfilter.Attribute
+	}{
+		{
+			name:     "ipv4 nat",
+			attrType: uint16(ctaNatDst),
+			addr:     netip.MustParseAddr("10.0.0.1"),
+			port:     8080,
+			want: netfilter.Attribute{
+				Type: uint16(ctaNatDst), Nested: true,
+				Children: []netfilter.Attribute{
+					{Type: uint16(ctaNatV4MinIP), Data: []byte{10, 0, 0, 1}},
+					{Type: uint16(ctaNatV4MaxIP), Data: []byte{10, 0, 0, 1}},
+					{
+						Type: uint16(ctaNatProto), Nested: true,
+						Children: []netfilter.Attribute{
+							{Type: uint16(ctaProtoNATPortMin), Data: []byte{0x1f, 0x90}},
+							{Type: uint16(ctaProtoNATPortMax), Data: []byte{0x1f, 0x90}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:     "ipv6 nat",
+			attrType: uint16(ctaNatSrc),
+			addr:     netip.MustParseAddr("fd00::1"),
+			port:     443,
+			want: netfilter.Attribute{
+				Type: uint16(ctaNatSrc), Nested: true,
+				Children: []netfilter.Attribute{
+					{Type: uint16(ctaNatV6MinIP), Data: netip.MustParseAddr("fd00::1").AsSlice()},
+					{Type: uint16(ctaNatV6MaxIP), Data: netip.MustParseAddr("fd00::1").AsSlice()},
+					{
+						Type: uint16(ctaNatProto), Nested: true,
+						Children: []netfilter.Attribute{
+							{Type: uint16(ctaProtoNATPortMin), Data: []byte{0x01, 0xbb}},
+							{Type: uint16(ctaProtoNATPortMax), Data: []byte{0x01, 0xbb}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := marshalNAT(tt.attrType, tt.addr, tt.port)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestFlowMarshalNAT(t *testing.T) {
+	// A reply tuple that represents a DNAT'd flow: orig 1.2.3.4:65280 -> 4.3.2.1:255,
+	// reply 4.3.2.1:255 -> 1.2.3.4:65280 (same as orig since flowIPPT is symmetric).
+	origTuple := flowIPPT
+
+	// A distinct reply tuple for SNAT: reply.src differs from orig.dst,
+	// so we can verify the NAT attribute picks up reply-side values.
+	snatReply := Tuple{
+		IP: IPTuple{
+			SourceAddress:      netip.MustParseAddr("5.6.7.8"),
+			DestinationAddress: netip.MustParseAddr("1.2.3.4"),
+		},
+		Proto: ProtoTuple{
+			Protocol:        6,
+			SourcePort:      9999,
+			DestinationPort: 65280,
+		},
+	}
+
+	// A distinct reply tuple for DNAT: reply.dst differs from orig.src.
+	dnatReply := Tuple{
+		IP: IPTuple{
+			SourceAddress:      netip.MustParseAddr("4.3.2.1"),
+			DestinationAddress: netip.MustParseAddr("9.8.7.6"),
+		},
+		Proto: ProtoTuple{
+			Protocol:        6,
+			SourcePort:      255,
+			DestinationPort: 8888,
+		},
+	}
+
+	// IPv6 tuples for v6 NAT path.
+	v6Orig := Tuple{
+		IP: IPTuple{
+			SourceAddress:      netip.MustParseAddr("fd00::1"),
+			DestinationAddress: netip.MustParseAddr("fd00::2"),
+		},
+		Proto: ProtoTuple{Protocol: 6, SourcePort: 1234, DestinationPort: 80},
+	}
+	v6Reply := Tuple{
+		IP: IPTuple{
+			SourceAddress:      netip.MustParseAddr("fd00::3"),
+			DestinationAddress: netip.MustParseAddr("fd00::1"),
+		},
+		Proto: ProtoTuple{Protocol: 6, SourcePort: 80, DestinationPort: 1234},
+	}
+
+	tests := []struct {
+		name        string
+		flow        Flow
+		wantNATAttr []netfilter.Attribute // expected NAT attributes at front of output
+		wantReply   Tuple                 // expected reply tuple after rewrite
+	}{
+		{
+			name: "dst nat ipv4",
+			flow: Flow{
+				Status:     StatusDstNAT,
+				TupleOrig:  origTuple,
+				TupleReply: dnatReply,
+			},
+			wantNATAttr: []netfilter.Attribute{
+				marshalNAT(uint16(ctaNatDst), dnatReply.IP.SourceAddress, dnatReply.Proto.SourcePort),
+			},
+			wantReply: invertTuple(origTuple, dnatReply.Zone),
+		},
+		{
+			name: "src nat ipv4",
+			flow: Flow{
+				Status:     StatusSrcNAT,
+				TupleOrig:  origTuple,
+				TupleReply: snatReply,
+			},
+			wantNATAttr: []netfilter.Attribute{
+				marshalNAT(uint16(ctaNatSrc), snatReply.IP.DestinationAddress, snatReply.Proto.DestinationPort),
+			},
+			wantReply: invertTuple(origTuple, snatReply.Zone),
+		},
+		{
+			name: "both src and dst nat",
+			flow: Flow{
+				Status:     StatusSrcNAT | StatusDstNAT,
+				TupleOrig:  origTuple,
+				TupleReply: dnatReply,
+			},
+			wantNATAttr: []netfilter.Attribute{
+				marshalNAT(uint16(ctaNatDst), dnatReply.IP.SourceAddress, dnatReply.Proto.SourcePort),
+				marshalNAT(uint16(ctaNatSrc), dnatReply.IP.DestinationAddress, dnatReply.Proto.DestinationPort),
+			},
+			wantReply: invertTuple(origTuple, dnatReply.Zone),
+		},
+		{
+			name: "dst nat ipv6",
+			flow: Flow{
+				Status:     StatusDstNAT,
+				TupleOrig:  v6Orig,
+				TupleReply: v6Reply,
+			},
+			wantNATAttr: []netfilter.Attribute{
+				marshalNAT(uint16(ctaNatDst), v6Reply.IP.SourceAddress, v6Reply.Proto.SourcePort),
+			},
+			wantReply: invertTuple(v6Orig, v6Reply.Zone),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			attrs, err := tt.flow.marshal()
+			require.NoError(t, err)
+
+			// NAT attributes are prepended before TupleOrig/TupleReply.
+			assert.Equal(t, tt.wantNATAttr, attrs[:len(tt.wantNATAttr)])
+
+			// Find the reply tuple attribute and decode it to verify the rewrite.
+			var replyAttr netfilter.Attribute
+			for _, a := range attrs {
+				if a.Type == uint16(ctaTupleReply) {
+					replyAttr = a
+					break
+				}
+			}
+			require.NotNil(t, replyAttr.Children, "no reply tuple in marshal output")
+
+			var rt Tuple
+			err = rt.unmarshal(mustDecodeAttributes(replyAttr.Children))
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantReply, rt)
+		})
+	}
+
+	// NAT synthesis is skipped when only one tuple is present (even if NAT status bits are set).
+	t.Run("skips when only orig tuple present", func(t *testing.T) {
+		f := Flow{Status: StatusDstNAT, TupleOrig: origTuple}
+		attrs, err := f.marshal()
+		require.NoError(t, err)
+
+		// No NAT attributes should appear; first attr should be ctaTupleOrig.
+		for _, a := range attrs {
+			assert.NotEqual(t, uint16(ctaNatDst), a.Type, "unexpected CTA_NAT_DST without reply tuple")
+			assert.NotEqual(t, uint16(ctaNatSrc), a.Type, "unexpected CTA_NAT_SRC without reply tuple")
+		}
+	})
+
+	// NAT synthesis is skipped when no NAT status bits are set.
+	t.Run("skips when no nat status", func(t *testing.T) {
+		f := Flow{Status: StatusSeenReply, TupleOrig: origTuple, TupleReply: dnatReply}
+		attrs, err := f.marshal()
+		require.NoError(t, err)
+
+		for _, a := range attrs {
+			assert.NotEqual(t, uint16(ctaNatDst), a.Type, "unexpected CTA_NAT_DST without NAT status")
+			assert.NotEqual(t, uint16(ctaNatSrc), a.Type, "unexpected CTA_NAT_SRC without NAT status")
+		}
+	})
+}
+
+// invertTuple returns the inverse of the given tuple (swap src/dst addr+port),
+// preserving the zone from the original reply tuple. This mirrors the
+// TupleReply rewrite performed by Flow.marshal when NAT is active.
+func invertTuple(orig Tuple, zone uint16) Tuple {
+	return Tuple{
+		IP: IPTuple{
+			SourceAddress:      orig.IP.DestinationAddress,
+			DestinationAddress: orig.IP.SourceAddress,
+		},
+		Proto: ProtoTuple{
+			Protocol:        orig.Proto.Protocol,
+			SourcePort:      orig.Proto.DestinationPort,
+			DestinationPort: orig.Proto.SourcePort,
+		},
+		Zone: zone,
+	}
 }
 
 func BenchmarkFlowUnmarshal(b *testing.B) {
