@@ -188,6 +188,38 @@ func (f Flow) marshal() ([]netfilter.Attribute, error) {
 
 	attrs := make([]netfilter.Attribute, 0, 14)
 
+	// When NAT status bits are set and both tuples are present,
+	// synthesize CTA_NAT_DST / CTA_NAT_SRC so the kernel's ctnetlink_setup_nat() re-binds the NAT extension on create.
+	// Without these attributes the kernel strips IPS_*_NAT from the status (IPS_UNCHANGEABLE_MASK)
+	// and the flow loses its NAT binding.
+	// The reply tuple is rewritten to invert(orig) so that nf_nat_setup_info() sees a delta and actually applies the rewrite.
+	natActive := f.Status.DstNAT() || f.Status.SrcNAT()
+	if natActive && f.TupleOrig.filled() && f.TupleReply.filled() {
+		if f.Status.DstNAT() {
+			// orig.dst was rewritten; reply.src is the post-DNAT target.
+			attrs = append(attrs, marshalNAT(uint16(ctaNatDst),
+				f.TupleReply.IP.SourceAddress, f.TupleReply.Proto.SourcePort))
+		}
+		if f.Status.SrcNAT() {
+			// orig.src was rewritten; reply.dst is the post-SNAT target.
+			attrs = append(attrs, marshalNAT(uint16(ctaNatSrc),
+				f.TupleReply.IP.DestinationAddress, f.TupleReply.Proto.DestinationPort))
+		}
+		// Replace reply with invert(orig) so the kernel re-derives the post-NAT reply from our CTA_NAT_* attributes.
+		f.TupleReply = Tuple{
+			IP: IPTuple{
+				SourceAddress:      f.TupleOrig.IP.DestinationAddress,
+				DestinationAddress: f.TupleOrig.IP.SourceAddress,
+			},
+			Proto: ProtoTuple{
+				Protocol:        f.TupleOrig.Proto.Protocol,
+				SourcePort:      f.TupleOrig.Proto.DestinationPort,
+				DestinationPort: f.TupleOrig.Proto.SourcePort,
+			},
+			Zone: f.TupleReply.Zone,
+		}
+	}
+
 	if f.TupleOrig.filled() {
 		to, err := f.TupleOrig.marshal(uint16(ctaTupleOrig))
 		if err != nil {
@@ -285,6 +317,34 @@ func unmarshalFlow(nlm netlink.Message) (Flow, error) {
 	}
 
 	return f, nil
+}
+
+// marshalNAT builds a CTA_NAT_SRC or CTA_NAT_DST nested attribute from an IP address and port.
+// The attribute contains min/max IP (same value - single address range) and a nested CTA_NAT_PROTO with min/max port.
+func marshalNAT(attrType uint16, addr netip.Addr, port uint16) netfilter.Attribute {
+	var minIPType, maxIPType natType
+	if addr.Is4() {
+		minIPType, maxIPType = ctaNatV4MinIP, ctaNatV4MaxIP
+	} else {
+		minIPType, maxIPType = ctaNatV6MinIP, ctaNatV6MaxIP
+	}
+
+	proto := netfilter.Attribute{
+		Type: uint16(ctaNatProto), Nested: true,
+		Children: []netfilter.Attribute{
+			{Type: uint16(ctaProtoNATPortMin), Data: netfilter.Uint16Bytes(port)},
+			{Type: uint16(ctaProtoNATPortMax), Data: netfilter.Uint16Bytes(port)},
+		},
+	}
+
+	return netfilter.Attribute{
+		Type: attrType, Nested: true,
+		Children: []netfilter.Attribute{
+			{Type: uint16(minIPType), Data: addr.AsSlice()},
+			{Type: uint16(maxIPType), Data: addr.AsSlice()},
+			proto,
+		},
+	}
 }
 
 // unmarshalFlows unmarshals a list of flows from a list of Netlink messages.
